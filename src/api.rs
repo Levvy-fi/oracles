@@ -63,7 +63,7 @@ impl APIServer {
             .with_state(self.state);
         set.spawn(async move {
             info!("API server starting on port {}", port);
-            let listener = match TcpListener::bind(("0.0.0.0", port)).await {
+            let listener = match TcpListener::bind(("::", port)).await {
                 Ok(l) => l,
                 Err(error) => {
                     warn!("Could not start API server: {}", error);
