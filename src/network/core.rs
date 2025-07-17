@@ -319,7 +319,7 @@ impl Core {
         self,
         outgoing_message_rxs: DashMap<NodeId, Mutex<mpsc::Receiver<MessageAndContext>>>,
     ) {
-        let addr = format!("0.0.0.0:{}", self.port);
+        let addr = format!("[::]:{}", self.port);
         let outgoing_message_rxs = Arc::new(outgoing_message_rxs);
         info!("Listening on: {}", addr);
 
