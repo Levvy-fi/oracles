@@ -5,9 +5,11 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::get,
+    routing::{delete, get, post},
 };
-use serde::Serialize;
+use dashmap::DashMap;
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::{net::TcpListener, sync::watch, task::JoinSet};
 use tracing::{info, warn};
@@ -18,6 +20,16 @@ use crate::{
     price_aggregator::TokenPrice,
     signature_aggregator::{GenericPayloadEntry, Payload, SyntheticPayloadEntry},
 };
+
+/// Test price override for liquidation testing
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct TestPriceOverride {
+    pub token: String,
+    pub unit: String,
+    pub value: Decimal,
+}
+
+pub type TestPriceOverrides = Arc<DashMap<String, TestPriceOverride>>;
 
 #[derive(Clone, Serialize)]
 struct OracleIdentifiers {
@@ -30,6 +42,7 @@ pub struct APIState {
     payload_source: Arc<watch::Receiver<Payload>>,
     prices_source: Arc<watch::Receiver<Vec<TokenPrice>>>,
     oracle: OracleIdentifiers,
+    test_price_overrides: TestPriceOverrides,
 }
 
 pub struct APIServer {
@@ -40,6 +53,7 @@ impl APIServer {
         config: &OracleConfig,
         payload_source: watch::Receiver<Payload>,
         audit_source: watch::Receiver<Vec<TokenPrice>>,
+        test_price_overrides: TestPriceOverrides,
     ) -> Self {
         Self {
             state: APIState {
@@ -49,6 +63,7 @@ impl APIServer {
                     name: config.label.clone(),
                 },
                 prices_source: Arc::new(audit_source),
+                test_price_overrides,
             },
         }
     }
@@ -60,6 +75,10 @@ impl APIServer {
             .route("/payload", get(report_all_payloads))
             .route("/payload/{feed}", get(report_payload))
             .route("/prices", get(report_all_prices))
+            // Test endpoints for liquidation testing (temporary)
+            .route("/test/set-price", post(set_test_price))
+            .route("/test/prices", get(get_test_prices))
+            .route("/test/clear-prices", delete(clear_test_prices))
             .with_state(self.state);
         set.spawn(async move {
             info!("API server starting on port {}", port);
@@ -133,4 +152,53 @@ async fn report_payload(
         return Response::Generic(entry);
     }
     Response::NotFound
+}
+
+// ============================================================================
+// Test endpoints for liquidation testing (TEMPORARY - remove before production)
+// ============================================================================
+
+/// Set a custom test price for a token
+async fn set_test_price(
+    State(state): State<APIState>,
+    Json(override_req): Json<TestPriceOverride>,
+) -> impl IntoResponse {
+    let key = format!("{}-{}", override_req.token, override_req.unit);
+    info!(
+        "Setting test price override: {} = {} {}",
+        override_req.token, override_req.value, override_req.unit
+    );
+    state.test_price_overrides.insert(key.clone(), override_req.clone());
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "ok",
+            "message": format!("Test price set for {}", key),
+            "override": override_req
+        })),
+    )
+}
+
+/// Get all currently active test price overrides
+async fn get_test_prices(State(state): State<APIState>) -> impl IntoResponse {
+    let overrides: Vec<TestPriceOverride> = state
+        .test_price_overrides
+        .iter()
+        .map(|entry| entry.value().clone())
+        .collect();
+    (StatusCode::OK, Json(json!({ "overrides": overrides })))
+}
+
+/// Clear all test price overrides
+async fn clear_test_prices(State(state): State<APIState>) -> impl IntoResponse {
+    let count = state.test_price_overrides.len();
+    state.test_price_overrides.clear();
+    info!("Cleared {} test price overrides", count);
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "ok",
+            "message": format!("Cleared {} test price overrides", count)
+        })),
+    )
 }

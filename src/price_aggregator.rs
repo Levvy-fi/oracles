@@ -17,6 +17,7 @@ use tokio::{sync::watch, task::JoinSet, time::sleep};
 use tracing::{debug, error, warn};
 
 use crate::{
+    api::TestPriceOverrides,
     config::{OracleConfig, SyntheticConfig},
     health::{HealthSink, HealthStatus, Origin},
     price_feed::{
@@ -75,6 +76,7 @@ pub struct PriceAggregator {
     persistence: TokenPricePersistence,
     gema: GemaCalculator,
     config: Arc<OracleConfig>,
+    test_price_overrides: TestPriceOverrides,
 }
 
 impl PriceAggregator {
@@ -83,6 +85,7 @@ impl PriceAggregator {
         audit_sink: watch::Sender<Vec<TokenPrice>>,
         payload_source: watch::Receiver<Payload>,
         config: Arc<OracleConfig>,
+        test_price_overrides: TestPriceOverrides,
     ) -> Result<Self> {
         let mut sources = vec![
             SourceAdapter::new(BinanceSource::new(&config), &config),
@@ -158,6 +161,7 @@ impl PriceAggregator {
             persistence: TokenPricePersistence::new(&config),
             gema: GemaCalculator::new(config.gema_periods, config.round_duration),
             config,
+            test_price_overrides,
         })
     }
 
@@ -246,13 +250,16 @@ impl PriceAggregator {
     }
 
     async fn report(&mut self, source_prices: &[(String, PriceInfo)], health: &HealthSink) {
+        // Apply test price overrides if any are set
+        let source_prices = self.apply_test_overrides(source_prices);
+
         let default_prices = if self.config.use_persisted_prices {
             self.persistence.saved_prices()
         } else {
             vec![]
         };
         let converter = TokenPriceConverter::new(
-            source_prices,
+            &source_prices,
             &default_prices,
             &self.config.synthetics,
             &self.config.currencies,
@@ -284,6 +291,49 @@ impl PriceAggregator {
         self.audit_sink.send_replace(token_values);
 
         self.persistence.save_prices(&converter).await;
+    }
+
+    /// Apply test price overrides - replaces real prices with test values
+    fn apply_test_overrides(&self, source_prices: &[(String, PriceInfo)]) -> Vec<(String, PriceInfo)> {
+        if self.test_price_overrides.is_empty() {
+            return source_prices.to_vec();
+        }
+
+        let mut result: Vec<(String, PriceInfo)> = Vec::new();
+        let mut overridden_tokens: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // First, add test overrides with high reliability
+        for entry in self.test_price_overrides.iter() {
+            let override_info = entry.value();
+            let key = format!("{}-{}", override_info.token, override_info.unit);
+            overridden_tokens.insert(key);
+
+            warn!(
+                "Applying TEST price override: {} = {} {} (THIS IS FOR TESTING ONLY)",
+                override_info.token, override_info.value, override_info.unit
+            );
+
+            result.push((
+                "TEST_OVERRIDE".to_string(),
+                PriceInfo {
+                    token: override_info.token.clone(),
+                    unit: override_info.unit.clone(),
+                    value: override_info.value,
+                    // Use very high reliability to ensure this price dominates
+                    reliability: rust_decimal::Decimal::from(1_000_000_000_000_000i64),
+                },
+            ));
+        }
+
+        // Then add real prices for tokens that aren't overridden
+        for (source_name, price_info) in source_prices {
+            let key = format!("{}-{}", price_info.token, price_info.unit);
+            if !overridden_tokens.contains(&key) {
+                result.push((source_name.clone(), price_info.clone()));
+            }
+        }
+
+        result
     }
 
     fn compute_synthetic_payload(

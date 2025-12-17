@@ -2,8 +2,9 @@ use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
 use clap::Parser;
+use dashmap::DashMap;
 use oracles::{
-    api::APIServer,
+    api::{APIServer, TestPriceOverrides},
     config::{OracleConfig, load_config},
     dkg,
     health::{HealthServer, HealthSink},
@@ -53,6 +54,9 @@ impl Node {
         let (price_audit_sink, price_audit_source) = watch::channel(vec![]);
         let (raft_client, raft_source) = RaftClient::new();
 
+        // Shared test price overrides (for liquidation testing)
+        let test_price_overrides: TestPriceOverrides = Arc::new(DashMap::new());
+
         let (health_server, health_sink) = HealthServer::new(
             config.frost_address.as_ref(),
             &config.network,
@@ -88,9 +92,10 @@ impl Node {
             price_audit_sink,
             payload_source.clone(),
             config.clone(),
+            test_price_overrides.clone(),
         )?;
 
-        let api_server = APIServer::new(&config, payload_source.clone(), price_audit_source);
+        let api_server = APIServer::new(&config, payload_source.clone(), price_audit_source, test_price_overrides);
 
         let publisher = Publisher::new(&config, payload_source)?;
 
