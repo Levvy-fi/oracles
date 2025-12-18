@@ -111,6 +111,24 @@ impl<'a> TokenPriceConverter<'a> {
 
         let prices = self.prices.get(token).into_iter().flat_map(|p| p.iter());
 
+        // Check for TEST_OVERRIDE source - if found, bypass median/outlier logic entirely
+        for price in self.prices.get(token).into_iter().flat_map(|p| p.iter()) {
+            for source in &price.sources {
+                if source.name == "TEST_OVERRIDE" {
+                    // Convert through unit if needed
+                    if let Some(conversion_factor) = self.value_in_usd(&price.unit) {
+                        warn!(
+                            token,
+                            unit = price.unit,
+                            value = %source.value,
+                            "Using TEST_OVERRIDE price (bypassing median/outlier filtering)"
+                        );
+                        return Some(&source.value * &conversion_factor);
+                    }
+                }
+            }
+        }
+
         let min_tvl = self
             .min_tvls
             .get(token)
