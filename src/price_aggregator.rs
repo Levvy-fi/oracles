@@ -293,6 +293,11 @@ impl PriceAggregator {
         self.persistence.save_prices(&converter).await;
     }
 
+    /// Check if a token has a test price override
+    fn has_test_override(&self, token: &str) -> bool {
+        self.test_price_overrides.iter().any(|entry| entry.value().token == token)
+    }
+
     /// Apply test price overrides - replaces real prices with test values
     fn apply_test_overrides(&self, source_prices: &[(String, PriceInfo)]) -> Vec<(String, PriceInfo)> {
         if self.test_price_overrides.is_empty() {
@@ -394,8 +399,20 @@ impl PriceAggregator {
             );
         }
 
-        // apply GEMA smoothing to the prices we've found this round
-        let prices = self.apply_synth_gema(&synth.name, prices);
+        // Skip GEMA smoothing if synthetic or any collateral has a test override
+        let skip_gema = self.has_test_override(&synth.name)
+            || collateral.iter().any(|c| self.has_test_override(c));
+
+        let prices = if skip_gema {
+            warn!(
+                synthetic = synth.name,
+                "Skipping GEMA smoothing for synthetic with TEST_OVERRIDE"
+            );
+            prices
+        } else {
+            // apply GEMA smoothing to the prices we've found this round
+            self.apply_synth_gema(&synth.name, prices)
+        };
 
         // track metrics for the different prices
         for (collateral_name, collateral_price) in collateral.iter().zip(prices.iter()) {
@@ -466,16 +483,25 @@ impl PriceAggregator {
             timestamp,
         });
 
+        // Skip GEMA smoothing if this currency has a test override
+        let skip_gema = self.has_test_override(currency);
+        if skip_gema {
+            warn!(
+                currency,
+                "Skipping GEMA smoothing for currency with TEST_OVERRIDE"
+            );
+        }
+
         let token_usd_gema = format!("{currency}/USD#GEMA");
         feeds.push(GenericPriceFeed {
-            price: self.apply_gema(&token_usd_gema, token_usd),
+            price: if skip_gema { token_usd.clone() } else { self.apply_gema(&token_usd_gema, token_usd) },
             name: token_usd_gema,
             timestamp,
         });
 
         let usd_token_gema_feed = format!("USD/{currency}#GEMA");
         feeds.push(GenericPriceFeed {
-            price: self.apply_gema(&usd_token_gema_feed, usd_token),
+            price: if skip_gema { usd_token.clone() } else { self.apply_gema(&usd_token_gema_feed, usd_token) },
             name: usd_token_gema_feed,
             timestamp,
         });
